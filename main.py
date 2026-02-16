@@ -1,6 +1,12 @@
-import os
+import dotenv
 import pandas as pd
+from os import getenv
 from urllib.parse import urlparse, parse_qs
+from arcgis.gis import GIS
+from arcgis.features import Feature
+
+
+dotenv.load_dotenv()
 
 
 def parse_google_sheet_url(url: str) -> tuple[str, int]:
@@ -21,7 +27,11 @@ def parse_google_sheet_url(url: str) -> tuple[str, int]:
         raise ValueError("Invalid Google Sheets URL: cannot find sheet ID")
 
     query = parse_qs(parsed.query)
-    gid = int(query.get("gid", ["0"])[0])
+    fragment = parse_qs(parsed.fragment)
+
+    gid = int(
+        query.get("gid", fragment.get("gid", ["0"]))[0]
+    )
 
     return sheet_id, gid
 
@@ -80,22 +90,53 @@ def expand_dataframe(df: pd.DataFrame) -> pd.DataFrame:
     return pd.DataFrame(expanded_rows)
 
 
-def save_to_csv(df: pd.DataFrame, sheet_id: str) -> str:
+def df_to_features(df: pd.DataFrame) -> list:
     """
-    Save the DataFrame to a CSV file in the 'data/' folder.
-    File name format: {number_of_existing_files + 1}_expanded_data_{sheet_id}.csv
-    Returns the file path.
+    Convert a DataFrame to a list of ArcGIS Feature objects.
+
+    Each row becomes a Feature with attributes mapped to the feature layer
+    and geometry set from 'long' and 'lat'.
+
+    Args:
+        df (pd.DataFrame): DataFrame with columns 'Дата', 'Область', 'Місто',
+                           'Значення 1'..'Значення 10', 'long', 'lat'.
+
+    Returns:
+        List[Feature]: List of Features ready for adding to a Feature Layer.
     """
+    features = []
 
-    folder = "data"
-    os.makedirs(folder, exist_ok=True)
+    for _, row in df.iterrows():
+        if pd.isna(row["long"]) or pd.isna(row["lat"]):
+            continue
 
-    existing_files = [f for f in os.listdir(folder) if f.endswith(".csv")]
-    file_number = len(existing_files) + 1
+        attr = {
+            "date": str(row["Дата"]),
+            "region": str(row["Область"]),
+            "city": str(row["Місто"]),
+            "value_1": int(row["Значення 1"]),
+            "value_2": int(row["Значення 2"]),
+            "value_3": int(row["Значення 3"]),
+            "value_4": int(row["Значення 4"]),
+            "value_5": int(row["Значення 5"]),
+            "value_6": int(row["Значення 6"]),
+            "value_7": int(row["Значення 7"]),
+            "value_8": int(row["Значення 8"]),
+            "value_9": int(row["Значення 9"]),
+            "value_10": int(row["Значення 10"]),
+            "long": float(row["long"]),
+            "lat": float(row["lat"])
+        }
 
-    output_file = os.path.join(folder, f"{file_number}_expanded_data_{sheet_id}.csv")
-    df.to_csv(output_file, index=False, encoding='utf-8-sig')
-    return output_file
+        geom = {
+            "x": float(row["long"]),
+            "y": float(row["lat"]),
+            "spatialReference": {"wkid": 4326}
+        }
+
+        features.append(Feature(attributes=attr, geometry=geom))
+
+    return features
 
 
 def main():
@@ -110,8 +151,29 @@ def main():
         print("Expanded table:", len(df_expanded))
         print(df_expanded.head(10))
 
-        csv_file = save_to_csv(df_expanded, SHEET_ID)
-        print(f"CSV file saved: {csv_file}")
+        item_id = getenv("item_id")
+        gis = GIS()
+        item = gis.content.get(item_id)
+        layer = item.layers[0]
+
+        fields = layer.properties.fields
+
+        # ПОЛЯ В ЗАДАНИИ НЕ СООТВЕТСВУЮТ РЕАЛЬНЫМ ЗНАЧЕНИЯМ ПРОШУ ОБРАТИТЬ ВНИМАНЕ !!!
+        print("\n--- ПРОВЕРКА ПОЛЕЙ СЛОЯ ---")
+        for f in fields:
+            print(f"System Name: '{f.name}' | Type: {f.type} | Alias: {f.alias}")
+        print("---------------------------\n")
+
+        features = df_to_features(df_expanded)
+        batch_size = 500
+
+        print("Starting batch processing...")
+        for i in range(0, len(features), batch_size):
+            try:
+                layer.edit_features(adds=features[i:i + batch_size])
+                print(f"Added features {i} to {i + len(features[i:i + batch_size])}")
+            except Exception as e:
+                print(f"Failed to add features {i}-{i + batch_size}: {e}")
 
     except ValueError as ve:
         print(f"Error: {ve}")
