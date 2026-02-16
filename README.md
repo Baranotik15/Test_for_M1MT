@@ -109,8 +109,6 @@ https://docs.google.com/spreadsheets/d/12846JbH2PwR0wN8eLVnosg4xujw-04gKyyD6RuEl
 
 ---
 
-## Пример результата:
-![img_2.png](img_2.png)
 
 ## English Version
 
@@ -220,6 +218,3 @@ After that, the script will:
 * If the data in `long` and `lat` uses a comma as the decimal separator, the script automatically replaces it with a dot.
 * Empty values in columns `Value 1-10` are replaced with 0.
 * Errors when adding features are printed to the console; other batches continue uploading.
-
-## Example of result
-![img_1.png](img_1.png)
