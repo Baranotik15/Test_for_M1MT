@@ -9,3 +9,13 @@ venv/
 
 .ipynb_checkpoints/
 .idea
+.pytest_cache/
+*.log
+logs/
+
+htmlcov/
+.coverage
+.coverage.*
+
+
+clear_layer.py
