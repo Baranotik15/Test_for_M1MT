@@ -1,185 +1,172 @@
-import dotenv
-import pandas as pd
-from os import getenv
-from urllib.parse import urlparse, parse_qs
-from arcgis.gis import GIS
-from arcgis.features import Feature
+import logging
+import argparse
+import sys
+from datetime import datetime
+from pathlib import Path
+
+import config
+from utils.logger import setup_logging
+from utils.google_sheets import parse_google_sheet_url, load_google_sheet, GoogleSheetsError
+from utils.data_processing import expand_dataframe, validate_dataframe
+from utils.arcgis_client import (
+    ArcGISClient,
+    ArcGISError,
+    df_to_features,
+    upload_features_batch
+)
+
+logger = logging.getLogger(__name__)
 
 
-dotenv.load_dotenv()
-
-
-def parse_google_sheet_url(url: str) -> tuple[str, int]:
-    """
-    Parse Google Sheets URL and return (sheet_id, gid).
-
-    Example URL:
-    https://docs.google.com/spreadsheets/d/12846JbH2PwR0wN8eLVnosg4xujw-04gKyyD6RuElc-4/edit?gid=0#gid=0
-    Returns: ("12846JbH2PwR0wN8eLVnosg4xujw-04gKyyD6RuElc-4", 0)
-    """
-    parsed = urlparse(url)
-    path_parts = parsed.path.split('/')
-
-    try:
-        sheet_id_index = path_parts.index("d") + 1
-        sheet_id = path_parts[sheet_id_index]
-    except (ValueError, IndexError):
-        raise ValueError("Invalid Google Sheets URL: cannot find sheet ID")
-
-    query = parse_qs(parsed.query)
-    fragment = parse_qs(parsed.fragment)
-
-    gid = int(
-        query.get("gid", fragment.get("gid", ["0"]))[0]
+def parse_arguments() -> argparse.Namespace:
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Load data from Google Sheets and upload to ArcGIS Feature Layer",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+        epilog="""
+Examples:
+  python main.py
+  python main.py --url "https://docs.google.com/spreadsheets/d/SHEET_ID/edit?gid=0"
+  python main.py --url "URL" --batch-size 1000 --log-level DEBUG
+  python main.py --url "URL" --log-file logs/run.log
+        """
     )
 
-    return sheet_id, gid
+    parser.add_argument("--url", type=str, help="Google Sheets URL to load data from")
+    parser.add_argument("--item-id", type=str, default=config.ARCGIS_ITEM_ID, help=f"ArcGIS item ID (default: {config.ARCGIS_ITEM_ID})")
+    parser.add_argument("--batch-size", type=int, default=config.BATCH_SIZE, help=f"Number of features per batch (default: {config.BATCH_SIZE})")
+    parser.add_argument("--log-level", type=str, default=config.LOG_LEVEL, choices=["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"], help=f"Logging level (default: {config.LOG_LEVEL})")
+    parser.add_argument("--log-file", type=Path, help="Path to log file (optional)")
+    parser.add_argument("--no-progress", action="store_true", help="Disable progress bars")
+    parser.add_argument("--show-fields", action="store_true", help="Show ArcGIS layer fields and exit")
+    parser.add_argument("--dry-run", action="store_true", help="Process data but don't upload to ArcGIS")
+
+    return parser.parse_args()
 
 
-def load_google_sheet(sheet_id: str, gid: int = 0) -> pd.DataFrame:
-    """
-    Load a Google Sheet by sheet ID and GID and return a prepared DataFrame.
+def get_google_sheet_url(url_arg: str = None) -> str:
+    """Get Google Sheets URL from argument or user input."""
+    if url_arg:
+        return url_arg
 
-    Converts 'long' and 'lat' columns to float32.
-    Converts 'Значення 1-10' columns to uint16, filling NaN with 0.
-    Raises ValueError if the sheet cannot be loaded.
-    """
-    url = f"https://docs.google.com/spreadsheets/d/{sheet_id}/export?format=csv&gid={gid}"
+    print("\n" + "=" * 80)
+    print("GOOGLE SHEETS URL INPUT")
+    print("=" * 80)
+    print("Enter the Google Sheets URL in the following format:")
+    print("https://docs.google.com/spreadsheets/d/SHEET_ID/edit?gid=0")
+    print("=" * 80 + "\n")
+
+    url = input("Google Sheets URL: ").strip()
+
+    if not url:
+        logger.error("No URL provided")
+        sys.exit(1)
+
+    return url
+
+
+def main() -> int:
+    """Main application entry point."""
+    args = parse_arguments()
+
+    log_file = args.log_file or config.LOGS_DIR / f"run_{datetime.now():%Y%m%d_%H%M%S}.log"
+    setup_logging(
+        log_level=args.log_level,
+        log_file=log_file,
+        log_format=config.LOG_FORMAT,
+        date_format=config.LOG_DATE_FORMAT
+    )
+
+    logger.info("=" * 80)
+    logger.info("M1MT GIS DEVELOPER TEST TASK - STARTED")
+    logger.info("=" * 80)
+
     try:
-        df = pd.read_csv(url)
+        logger.info("Step 1/5: Initializing ArcGIS client")
+        client = ArcGISClient()
+
+        logger.info("Step 2/5: Retrieving feature layer")
+        layer = client.get_feature_layer(args.item_id)
+
+        if args.show_fields:
+            client.print_layer_fields(layer)
+            return 0
+
+        logger.info("Step 3/5: Loading data from Google Sheets")
+        url = get_google_sheet_url(args.url)
+        sheet_id, gid = parse_google_sheet_url(url)
+
+        df = load_google_sheet(sheet_id, gid, config.VALUE_COLUMNS)
+        logger.info(f"Loaded {len(df)} rows from Google Sheets")
+
+        required_columns = ["Дата", "Область", "Місто", "long", "lat"] + config.VALUE_COLUMNS
+        validate_dataframe(df, required_columns)
+
+        logger.info("Step 4/5: Expanding data using 'unit ladder' rule")
+        df_expanded = expand_dataframe(
+            df,
+            value_columns=config.VALUE_COLUMNS,
+            show_progress=not args.no_progress
+        )
+
+        if len(df_expanded) == 0:
+            logger.warning("No data to upload after expansion (all values are zero)")
+            return 0
+
+        logger.info("Step 5/5: Converting to features and uploading to ArcGIS")
+
+        if args.dry_run:
+            logger.info("Dry run mode: skipping upload to ArcGIS")
+            features = df_to_features(df_expanded)
+            logger.info(f"Would upload {len(features)} features")
+        else:
+            features = df_to_features(df_expanded)
+
+            stats = upload_features_batch(
+                layer=layer,
+                features=features,
+                batch_size=args.batch_size,
+                show_progress=not args.no_progress
+            )
+
+            print("\n" + "=" * 80)
+            print("UPLOAD SUMMARY")
+            print("=" * 80)
+            print(f"Total features:     {stats['total']}")
+            print(f"Successfully added: {stats['success']}")
+            print(f"Failed:             {stats['failed']}")
+            print(f"Success rate:       {stats['success'] / stats['total'] * 100:.1f}%")
+            print("=" * 80 + "\n")
+
+            if stats['failed'] > 0:
+                logger.warning(f"{stats['failed']} features failed to upload. Check logs for details.")
+
+        logger.info("=" * 80)
+        logger.info("M1MT GIS DEVELOPER TEST TASK - COMPLETED SUCCESSFULLY")
+        logger.info("=" * 80)
+
+        return 0
+
+    except GoogleSheetsError as e:
+        logger.error(f"Google Sheets error: {e}")
+        return 1
+
+    except ArcGISError as e:
+        logger.error(f"ArcGIS error: {e}")
+        return 2
+
+    except ValueError as e:
+        logger.error(f"Validation error: {e}")
+        return 3
+
+    except KeyboardInterrupt:
+        logger.warning("Operation cancelled by user")
+        return 130
+
     except Exception as e:
-        raise ValueError(f"Failed to load Google Sheet. Check the URL or your internet connection.\nError: {e}")
-
-    df['long'] = pd.to_numeric(df['long'].str.replace(',', '.'), errors='coerce').astype("float32")
-    df['lat'] = pd.to_numeric(df['lat'].str.replace(',', '.'), errors='coerce').astype("float32")
-
-    for i in range(1, 11):
-        col = f'Значення {i}'
-        df[col] = df[col].fillna(0).astype("uint16")
-
-    return df
-
-
-def expand_row(row: pd.Series) -> list:
-    """
-    Expand a single row into multiple rows according to the "unit ladder" rule.
-    Returns a list of new rows (as Series).
-    """
-    value_cols = [f'Значення {i}' for i in range(1, 11)]
-    values = row[value_cols].values
-    max_val = values.max()
-    if max_val == 0:
-        return []
-    new_rows = []
-    for i in range(1, max_val + 1):
-        new_row = row.copy()
-        for j, val in enumerate(values):
-            new_row[value_cols[j]] = 1 if val >= i else 0
-        new_rows.append(new_row)
-    return new_rows
-
-
-def expand_dataframe(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Apply expand_row to all rows of the DataFrame and return the expanded DataFrame.
-    """
-    expanded_rows = []
-    for idx, row in df.iterrows():
-        new_rows = expand_row(row)
-        expanded_rows.extend(new_rows)
-    return pd.DataFrame(expanded_rows)
-
-
-def df_to_features(df: pd.DataFrame) -> list:
-    """
-    Convert a DataFrame to a list of ArcGIS Feature objects.
-
-    Each row becomes a Feature with attributes mapped to the feature layer
-    and geometry set from 'long' and 'lat'.
-
-    Args:
-        df (pd.DataFrame): DataFrame with columns 'Дата', 'Область', 'Місто',
-                           'Значення 1'..'Значення 10', 'long', 'lat'.
-
-    Returns:
-        List[Feature]: List of Features ready for adding to a Feature Layer.
-    """
-    features = []
-
-    for _, row in df.iterrows():
-        if pd.isna(row["long"]) or pd.isna(row["lat"]):
-            continue
-
-        attr = {
-            "date": str(row["Дата"]),
-            "region": str(row["Область"]),
-            "city": str(row["Місто"]),
-            "value_1": int(row["Значення 1"]),
-            "value_2": int(row["Значення 2"]),
-            "value_3": int(row["Значення 3"]),
-            "value_4": int(row["Значення 4"]),
-            "value_5": int(row["Значення 5"]),
-            "value_6": int(row["Значення 6"]),
-            "value_7": int(row["Значення 7"]),
-            "value_8": int(row["Значення 8"]),
-            "value_9": int(row["Значення 9"]),
-            "value_10": int(row["Значення 10"]),
-            "long": float(row["long"]),
-            "lat": float(row["lat"])
-        }
-
-        geom = {
-            "x": float(row["long"]),
-            "y": float(row["lat"]),
-            "spatialReference": {"wkid": 4326}
-        }
-
-        features.append(Feature(attributes=attr, geometry=geom))
-
-    return features
-
-
-def main():
-    try:
-        url_data = parse_google_sheet_url(input("Enter Google Sheet URL: "))
-        SHEET_ID, GID = url_data
-
-        df = load_google_sheet(SHEET_ID, GID)
-        print("Original table:", len(df))
-
-        df_expanded = expand_dataframe(df)
-        print("Expanded table:", len(df_expanded))
-        print(df_expanded.head(10))
-
-        item_id = getenv("item_id")
-        gis = GIS()
-        item = gis.content.get(item_id)
-        layer = item.layers[0]
-
-        fields = layer.properties.fields
-
-        # ПОЛЯ В ЗАДАНИИ НЕ СООТВЕТСВУЮТ РЕАЛЬНЫМ ЗНАЧЕНИЯМ ПРОШУ ОБРАТИТЬ ВНИМАНЕ !!!
-        print("\n--- ПРОВЕРКА ПОЛЕЙ СЛОЯ ---")
-        for f in fields:
-            print(f"System Name: '{f.name}' | Type: {f.type} | Alias: {f.alias}")
-        print("---------------------------\n")
-
-        features = df_to_features(df_expanded)
-        batch_size = 500
-
-        print("Starting batch processing...")
-        for i in range(0, len(features), batch_size):
-            try:
-                layer.edit_features(adds=features[i:i + batch_size])
-                print(f"Added features {i} to {i + len(features[i:i + batch_size])}")
-            except Exception as e:
-                print(f"Failed to add features {i}-{i + batch_size}: {e}")
-
-    except ValueError as ve:
-        print(f"Error: {ve}")
-    except Exception as e:
-        print(f"Unexpected error: {e}")
+        logger.exception(f"Unexpected error: {e}")
+        return 4
 
 
 if __name__ == "__main__":
-    main()
+    sys.exit(main())
