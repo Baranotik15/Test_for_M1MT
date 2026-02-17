@@ -9,7 +9,7 @@
 ### 1. Клонуйте репозиторій
 
 ```bash
-git clone https://github.com/Baranotik15/Test_for_M1MT
+git clone https://github.com/Baranotik15/Test_for_M1MT.git
 cd Test_for_M1MT
 ```
 
@@ -121,7 +121,7 @@ This script loads data from Google Sheets, transforms it into an expanded table 
 ### 1. Clone the repository
 
 ```bash
-git clone https://github.com/Baranotik15/Test_for_M1MT
+git clone https://github.com/Baranotik15/Test_for_M1MT.git
 cd Test_for_M1MT
 ```
 
