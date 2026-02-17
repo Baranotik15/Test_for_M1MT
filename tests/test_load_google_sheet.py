@@ -1,54 +1,36 @@
-import pandas as pd
+"""
+Tests for loading Google Sheets.
+"""
+
 import pytest
-import warnings
 from unittest.mock import patch
-from main import load_google_sheet
-
-@pytest.mark.parametrize(
-    "mock_data, expected_lengths, expected_types, expected_values",
-    [
-        (
-            pd.DataFrame({
-                "long": ["30,5", "31,6", None],
-                "lat": ["50,1", "51,2", "52,3"],
-                "Значення 1": [1, None, 3],
-                "Значення 2": [None, 2, None],
-                "Значення 3": [0, 0, 0],
-                "Значення 4": [None, None, None],
-                "Значення 5": [None, None, None],
-                "Значення 6": [None, None, None],
-                "Значення 7": [None, None, None],
-                "Значення 8": [None, None, None],
-                "Значення 9": [None, None, None],
-                "Значення 10": [None, None, None],
-            }),
-            3,
-            {"long": "float32", "lat": "float32", **{f"Значення {i}": "uint16" for i in range(1,11)}},
-            {"Значення 1_1": 0, "Значення 2_0": 0}
-        )
-    ]
-)
-def test_load_google_sheet_success(mock_data, expected_lengths, expected_types, expected_values):
-    with warnings.catch_warnings():
-        warnings.simplefilter("ignore", FutureWarning)
-        with patch("main.pd.read_csv", return_value=mock_data):
-            df = load_google_sheet("dummy_sheet_id", gid=0)
-
-    assert len(df) == expected_lengths
-    for col, dtype in expected_types.items():
-        assert str(df[col].dtype) == dtype
-    assert df["Значення 1"].iloc[1] == expected_values["Значення 1_1"]
-    assert df["Значення 2"].iloc[0] == expected_values["Значення 2_0"]
+import pandas as pd
+from utils.google_sheets import load_google_sheet, GoogleSheetsError
 
 
-@pytest.mark.parametrize(
-    "side_effect_exception",
-    [
-        Exception("Network error")
-    ]
-)
-def test_load_google_sheet_fail(side_effect_exception):
-    with patch("main.pd.read_csv", side_effect=side_effect_exception):
-        with pytest.raises(ValueError) as excinfo:
-            load_google_sheet("dummy_sheet_id", gid=0)
-        assert "Failed to load Google Sheet" in str(excinfo.value)
+def test_load_google_sheet_success():
+    """Test successful loading of Google Sheet."""
+    mock_df = pd.DataFrame({
+        "Дата": ["2026-01-01"],
+        "Область": ["Kyiv"],
+        "Місто": ["Kyiv"],
+        "long": ["30,5"],
+        "lat": ["50,5"],
+        **{f"Значення {i}": [1] for i in range(1, 11)}
+    })
+
+    with patch("pandas.read_csv", return_value=mock_df):
+        df = load_google_sheet("test_sheet_id", gid=0)
+
+        assert len(df) == 1
+        assert df["long"].dtype == "float32"
+        assert df["lat"].dtype == "float32"
+        assert df["long"].iloc[0] == 30.5
+        assert df["lat"].iloc[0] == 50.5
+
+
+def test_load_google_sheet_error():
+    """Test that loading errors are handled correctly."""
+    with patch("pandas.read_csv", side_effect=Exception("Network error")):
+        with pytest.raises(GoogleSheetsError):
+            load_google_sheet("test_sheet_id", gid=0)

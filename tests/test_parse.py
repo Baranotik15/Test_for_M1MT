@@ -1,5 +1,9 @@
+"""
+Tests for Google Sheets URL parsing.
+"""
+
 import pytest
-from main import parse_google_sheet_url
+from utils.google_sheets import parse_google_sheet_url, GoogleSheetsError
 
 
 @pytest.mark.parametrize(
@@ -14,8 +18,8 @@ from main import parse_google_sheet_url
             ("xyz789", 5)
         ),
         (
-                "https://docs.google.com/spreadsheets/d/bcr231/edit?gid=1",
-                ("bcr231", 1)
+            "https://docs.google.com/spreadsheets/d/bcr231/edit?gid=1",
+            ("bcr231", 1)
         ),
         (
             "https://docs.google.com/spreadsheets/d/aaa111/edit",
@@ -24,12 +28,11 @@ from main import parse_google_sheet_url
     ]
 )
 def test_parse_google_sheet_url(url, expected):
+    """Test that Google Sheets URLs are parsed correctly."""
     assert parse_google_sheet_url(url) == expected
 
 
 def test_parse_google_sheet_url_invalid():
-    import pytest
-    from main import parse_google_sheet_url
-
-    with pytest.raises(ValueError):
+    """Test that invalid URLs raise GoogleSheetsError."""
+    with pytest.raises(GoogleSheetsError):
         parse_google_sheet_url("https://docs.google.com/spreadsheets/invalid_url")
